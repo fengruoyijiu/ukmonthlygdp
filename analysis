@@ -1,0 +1,235 @@
+library(ggplot2)
+library(plotly)
+library(dplyr)
+
+########################
+#1 GDP data preparation
+########################
+# Import data
+gdp <- read.csv(file = "DATA PATH/monthlygdpto4dp.csv", header = TRUE, stringsAsFactors = FALSE,
+                skip = 3)
+
+# Rename columns
+colnames(gdp)
+colnames(gdp)[1:6] <- c("Month", "GDP", "Agriculture", "Construction", "Production", "Services")
+
+# Format the time variable
+gdp$Time <- zoo::as.yearmon(gdp$Month, "%Y%b")
+
+gdp$time <- as.character(gdp$Time)
+gdp$time <- as.Date(paste("01", gdp$time, sep = " "), format = "%d %b %Y")
+
+#####################
+#2 GDP dataset
+#####################
+
+# Plot index level
+p1 <- ggplot(gdp, aes(x = time, y = GDP)) +
+  geom_line(size = 1) +
+  xlab("Time") +
+  ylab("GDP Index (%)") +
+  scale_x_date(date_breaks = "4 years", date_labels = "%Y")
+p1
+
+# Plot index level in the past 24 month
+p2 <- ggplot(gdp[297:321, ], aes(x = time, y = GDP)) +
+  geom_line(size = 1) +
+  xlab("Time") +
+  ylab("GDP Index (%)") +
+  scale_x_date(date_breaks = "2 months", date_labels = "%Y.%m")
+p2
+
+# Plot latest GDP compared with previous month
+gdp$GDP_dif_month <- c(NA, diff(gdp$GDP))
+p3 <- ggplot(gdp, aes(x = Time, y = GDP_dif_month)) +
+  geom_line(size = 1) +
+  ylab("Monthly GDP Growth (%)")
+p3
+
+# mean before covid
+mean(gdp[1:278, ]$GDP_dif_month, na.rm=TRUE)
+# mean after covid
+mean(gdp[295:321, ]$GDP_dif_month, na.rm=TRUE)
+
+# standard deviation before covid
+sd(gdp[1:278, ]$GDP_dif_month, na.rm=TRUE)
+# standard deviation after covid
+sd(gdp[295:321, ]$GDP_dif_month, na.rm=TRUE)
+
+
+# Plot GDP + 4 sectors
+p4 <- ggplot(gdp, aes(x = time)) +
+  geom_line(aes(y = GDP, colour = "GDP"), size = 1) +
+  geom_line(aes(y = Agriculture, colour = "Agriculture"), size = 1) +
+  geom_line(aes(y = Construction, colour = "Construction"), size = 1) +
+  geom_line(aes(y = Production, colour = "Production"), size = 1) +
+  geom_line(aes(y = Services, colour = "Services"), size = 1) +
+  xlab("Time") +          # add label for x-axis
+  ylab("GDP Index (%)") +   # add label for y-axis
+  scale_colour_discrete("Lines") +    # Change legend title
+  scale_x_date(date_breaks = "4 years", date_labels = "%Y")
+p4
+
+##################################
+#3 unemployment data preparation
+##################################
+
+# Unemployment rate
+unemp <- read.csv(file = "DATA PATH/series-111123.csv", header = FALSE, stringsAsFactors = FALSE,
+                skip = 581)
+colnames(unemp)[1:2] <- c("Month", "Unemp_rate")
+unemp$Time <- zoo::as.yearmon(unemp$Month, "%Y %b")
+unemp$Unemp_rate_dif_month <- c(NA, diff(unemp$Unemp_rate))
+
+##################################################
+#4 combine gdp and unemployment data
+##################################################
+df0 <- gdp %>% 
+  full_join(unemp, by = "Time")
+
+df <- subset(df0, select = -c(Month.x, Month.y))
+
+# Plot of unemployment rate
+p5 <- ggplot(df, aes(x = time)) +
+  geom_line(aes(y = Unemp_rate), color = "red", size = 1) +
+  xlab("Time") +          # add label for x-axis
+  ylab("Unmployment Rate (%)") +   # add label for y-axis
+  scale_x_date(date_breaks = "4 years", date_labels = "%Y")
+p5
+
+df2 <- subset(df, select = c(GDP_dif_month, Unemp_rate))
+cor(df2, use = "complete.obs")
+########################################################################################
+#5 Analysis of combined data: monthly gdp growth and unemployment rate
+########################################################################################
+
+# subset df data
+df_sub <- df[complete.cases(df), ]
+
+# Declare time series environment
+library(urca)
+library(vars)
+library(mFilter)
+library(tseries)
+library(forecast)
+library(tidyverse)
+
+gdp <- ts(df_sub$GDP_dif_month, start = c(1997,2), frequency = 12)
+unem <- ts(df_sub$Unemp_rate, start = c(1997,2), frequency = 12)
+
+
+#Determine the persistence of the model
+acf(gdp, main = "ACF for Real GDP Growth")
+pacf(gdp, main = "PACF for Real GDP Growth")
+
+acf(unem, main = "ACF for Changes in Unemployment")
+pacf(unem, main = "PACF for Changes in Unemployment")
+
+# Find the optimal lags
+dat.bv <- cbind(gdp, unem)
+colnames(dat.bv) <- cbind("gdp", "unemployment")
+
+lagselect <- VARselect(dat.bv, lag.max = 10, type = "const")
+lagselect$selection
+
+#AIC(n)  HQ(n)  SC(n) FPE(n) 
+#7      5      3      7 
+#since most indicators say 7 lags for our VAR model, we use 7 lags
+
+model1 <- VAR(dat.bv, p = 7, type = "const", 
+              season = NULL, exogen = NULL)
+summary(model1)
+
+
+
+#5.1 diagnosing the VAR
+###########################################
+
+#Serial correlation
+Serial1 <- serial.test(model1, lags.pt = 12, type = "PT.asymptotic")
+Serial1  
+# p = 0.1452 > 0.05 means no serial correlation
+
+#heteroscedasticity
+Arch1 <- arch.test(model1, lags.multi = 12, multivariate.only = TRUE)
+Arch1
+# p = 1.183e-09 < 0.05 means heteroscedasticity exists!!!
+
+#Normal distribution of the residuals
+Norm1 <- normality.test(model1, multivariate.only = TRUE)
+Norm1
+# all p values < 0.05, suggesting non-normality
+
+#testing for structural breaks in the residuals
+Stability1 <- stability(model1, type = "OLS-CUSUM")
+plot(Stability1)
+# no points exceed the red line, meaning the system is stable
+
+#5.2  Granger causality
+################################
+
+Granger.GDP <- causality(model1, cause ="gdp")
+Granger.GDP
+# p = 1.508e-06 < 0.05, we can reject the null hypothesis 
+# H0: gdp do not Granger-cause unemployment
+# we conclude that: gdp Granger causes unemployment
+
+Granger.unemployment <- causality(model1, cause ="unemployment")
+Granger.unemployment
+# p = 0.04548 < 0.05, we cannot reject the null hypothesis at 95% confidence interval
+# we can reject the null hypothesis at 90% confidence interval
+# H0: unemployment do not Granger-cause gdp
+# we conclude that: unemployment Granger causes gdp
+
+
+#5.3 Impulse response functions and VAR forecasting
+####################################################
+GDP.irf <- irf(model1, impulse = "unemployment",
+               response = "gdp",
+               n.ahead = 20, boot = TRUE)
+plot(GDP.irf, ylab = "GDP", main = "Shock from Unemployment")
+
+
+unemployment.irf <- irf(model1, impulse = "gdp",
+                        response = "unemployment",
+                        n.ahead = 20, boot = TRUE)
+plot(unemployment.irf, ylab = "Unemployment", main = "Shock from GDP")
+
+#Variance Decomposition
+FEVD1 <- fevd(model1, n.head = 10)
+plot(FEVD1, xlab = "Number of Months Ahead")
+
+
+#VAR Forecasting
+forecast <- predict(model1, n.ahead = 12, ci = 0.95)
+fanchart(forecast, names = "gdp", 
+         main = "Forecasting of Month GDP Growth",
+         xlab = "Number of Period",
+         ylab = "Monthly GDP Growth (%)")
+
+fanchart(forecast, names = "unemployment",
+         main = "Forecasting of Unemployment Rate",
+         xlab = "Number of Period",
+         ylab = "Unemployment Rate (%)")
+
+
+########################
+#6 Interactive graphs
+########################
+
+p1 <- ggplotly(p1)
+p1 <- p1 %>% layout(dragmode = "pan")
+p1
+
+p3 <- ggplotly(p3)
+p3 <- p3 %>% layout(dragmode = "pan")
+p3
+
+p4 <- ggplotly(p4)
+p4 <- p4 %>% layout(dragmode = "pan")
+p4
+
+p5 <- ggplotly(p5)
+p5 <- p5 %>% layout(dragmode = "pan")
+p5
+
