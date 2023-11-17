@@ -1,2 +1,3 @@
 # ukmonthlygdp
-The R script contains analysis of UK monthly GDP and umemployment rate
+The R script is for analysing UK monthly GDP and umemployment rate.
+The HML files contain interactive graphs showing UK monthly GDP and unemployment rate.
